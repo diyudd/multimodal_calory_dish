@@ -14,10 +14,10 @@ import albumentations as A
 class MultimodalDataset(Dataset):
 
     def __init__(self, config, transforms, ds_type="train"):
-         # читаем общий dish.csv
+         
         df = pd.read_csv(config.DISH_CSV_PATH)
         self.ingr_df = pd.read_csv(config.INGR_CSV_PATH)
-        # фильтруем по колонке split
+        
         self.df = df[df["split"] == ds_type].reset_index(drop=True)
 
         self.image_cfg = timm.get_pretrained_cfg(config.IMAGE_MODEL_NAME)
@@ -25,7 +25,7 @@ class MultimodalDataset(Dataset):
         self.transforms = transforms
         self.img_dir = config.IMG_DIR
 
-        # Создаём словарь для преобразования ingr_id -> название
+        
         self.ingr_dict = {f"ingr_{int(row['id']):09d}": row['ingr'] for _, row in self.ingr_df.iterrows()}
 
     def __len__(self):
@@ -36,6 +36,7 @@ class MultimodalDataset(Dataset):
         text = " ".join([self.ingr_dict.get(i, "") for i in ingr_ids]) # type: ignore
         
         label = self.df.loc[idx, "total_calories"]
+        mass  = self.df.loc[idx, "total_mass"]
 
         dish_id = self.df.loc[idx, "dish_id"]
         img_path = f"{self.img_dir}/{dish_id}/rgb.png"
@@ -49,6 +50,7 @@ class MultimodalDataset(Dataset):
         image = self.transforms(image=np.array(image))["image"]
 
         return {"label": torch.tensor(label, dtype=torch.float32), 
+                "mass":  torch.tensor(mass,  dtype=torch.float32),
                 "image": image, 
                 "text": text}
 
@@ -57,6 +59,7 @@ def collate_fn(batch, tokenizer):
     texts = [item["text"] for item in batch]
     images = torch.stack([item["image"] for item in batch])
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.float32)
+    masses = torch.tensor([item["mass"] for item in batch], dtype=torch.float32)
 
 
     tokenized_input = tokenizer(texts,
@@ -67,6 +70,7 @@ def collate_fn(batch, tokenizer):
     return {
         "label": labels,
         "image": images,
+        "mass": masses,
         "input_ids": tokenized_input["input_ids"],
         "attention_mask": tokenized_input["attention_mask"]
     }
@@ -82,10 +86,10 @@ def get_transforms(config, ds_type="train"):
                     max_size=max(cfg.input_size[1], cfg.input_size[2]), p=1.0), # type: ignore
                 A.RandomCrop(
                     height=cfg.input_size[1], width=cfg.input_size[2], p=1.0), # type: ignore
-                A.Affine(scale=(0.8, 1.2),
-                         rotate=(-15, 15),
-                         translate_percent=(-0.1, 0.1),
-                         shear=(-10, 10),
+                A.Affine(scale=(0.9, 1.1),
+                         rotate=(-10, 10),
+                         translate_percent=(-0.05, 0.05),
+                         shear=(-8, 8),
                          fill=0,
                          p=0.8),
                 A.CoarseDropout(
@@ -96,11 +100,11 @@ def get_transforms(config, ds_type="train"):
                                       int(0.15 * cfg.input_size[2])), # type: ignore
                     fill=0,
                     p=0.5),
-                A.ColorJitter(brightness=0.1,
-                              contrast=0.1,
-                              saturation=0.1,
-                              hue=0.05,
-                              p=0.5),
+                A.ColorJitter(brightness=0.15,
+                              contrast=0.15,
+                              saturation=0.15,
+                              hue=0.1,
+                              p=0.7),
                 A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
                 A.ToTensorV2(p=1.0)
             ],

@@ -10,6 +10,7 @@ import torchmetrics
 import timm
 from transformers import AutoModel, AutoTokenizer
 from dataset import MultimodalDataset, collate_fn, get_transforms
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
 from clearml import Task
 
@@ -59,12 +60,6 @@ class MultimodalModel(nn.Module):
         self.text_proj = nn.Linear(self.text_model.config.hidden_size, config.HIDDEN_DIM)
         self.image_proj = nn.Linear(self.image_model.num_features, config.HIDDEN_DIM) # type: ignore
 
-        # Нормализация перед вниманием
-        #self.text_norm = nn.LayerNorm(config.HIDDEN_DIM)
-        #self.image_norm = nn.LayerNorm(config.HIDDEN_DIM)
-        #self.dropout = nn.Dropout(config.DROPOUT)
-
-
     def forward(self, input_ids, attention_mask, image):
         text_features = self.text_model(input_ids, attention_mask).last_hidden_state[:,  0, :]
         image_features = self.image_model(image)
@@ -72,69 +67,68 @@ class MultimodalModel(nn.Module):
         text_emb = self.text_proj(text_features)
         image_emb = self.image_proj(image_features)
 
-        # Без нормализаци
-        # text_emb = self.dropout(text_emb)
-        # image_emb = self.dropout(image_emb)
-
-        # С нормализацией
-        #text_emb = self.dropout(self.text_norm(text_emb))
-        #image_emb = self.dropout(self.image_norm(image_emb))
-
         return text_emb, image_emb
     
 class CrossAttentionModel(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config 
         # Инициализация базовых моделей
         self.base_model = MultimodalModel(config)
-        
-        # Нормализация перед вниманием
-        #self.text_norm = nn.LayerNorm(config.HIDDEN_DIM)
-        #self.image_norm = nn.LayerNorm(config.HIDDEN_DIM)
 
         # Механизм внимания
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=config.HIDDEN_DIM, 
-            num_heads=4,
-            dropout=config.DROPOUT)
+        self.cross_attn1 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
+                                                 num_heads=4, 
+                                                 dropout=config.DROPOUT)
+        self.cross_attn2 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
+                                                 num_heads=4, 
+                                                 dropout=config.DROPOUT)
         
         # LayerNorm и Dropout после attention
-        #self.post_attn_norm = nn.LayerNorm(config.HIDDEN_DIM)
-        #self.post_attn_dropout = nn.Dropout(config.DROPOUT)
+        self.post_attn_norm1 = nn.LayerNorm(config.HIDDEN_DIM)
+        self.post_attn_norm2 = nn.LayerNorm(config.HIDDEN_DIM)
+        self.post_attn_dropout = nn.Dropout(config.DROPOUT)
         
         # Регрессор с нормализацией и дропаут
         self.regressor = nn.Sequential(
-            nn.LayerNorm(config.HIDDEN_DIM),  # Дополнительная нормализация после attention
+            nn.LayerNorm(config.HIDDEN_DIM + 1),  # Дополнительная нормализация после attention
+            nn.Linear(config.HIDDEN_DIM + 1, config.HIDDEN_DIM // 2), 
+            nn.ReLU(),  
+            nn.Dropout(config.DROPOUT),                             
+            nn.Linear(config.HIDDEN_DIM // 2, config.HIDDEN_DIM // 4),
+            nn.ReLU(),  
             nn.Dropout(config.DROPOUT),
-            nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM // 2), 
-            nn.ReLU(),                               
-            nn.Linear(config.HIDDEN_DIM // 2, 1)
+            nn.Linear(config.HIDDEN_DIM // 4, 1),
         )
         # self.regressor = nn.Linear(config.HIDDEN_DIM, 1)
         
-    def forward(self, input_ids, attention_mask, image):
-        # Получаем эмбеддинги модальностей
+    def forward(self, input_ids, attention_mask, image, mass):
+       
         text_emb, image_emb = self.base_model(input_ids, attention_mask, image)
-
-        # Нормализация
-        #text_emb = self.text_norm(text_emb)
-        #image_emb = self.image_norm(image_emb)
 
         text_emb = text_emb.unsqueeze(0)   # [1, batch, dim]
         image_emb = image_emb.unsqueeze(0) # [1, batch, dim]
 
-        attended_emb, _ = self.cross_attn(
+        attended_emb1, _ = self.cross_attn1(
             query=text_emb,
             key=image_emb,
             value=image_emb
         )
-        
-        fused_emb = attended_emb.squeeze(0)  # [batch, embed_dim]
+        # Residual connection
+        fused_emb1 = self.post_attn_norm1(attended_emb1 + text_emb)
 
-        # Residual connection + LayerNorm + Dropout
-        # fused_emb = self.post_attn_dropout(self.post_attn_norm(fused_emb + text_emb.squeeze(0)))
+        attended_emb2, _ = self.cross_attn2(
+            query=fused_emb1,
+            key=image_emb,
+            value=image_emb
+        )
+        fused_emb2 = self.post_attn_norm2(self.post_attn_dropout(attended_emb2 + fused_emb1)).squeeze(0)
 
-        output = self.regressor(fused_emb).squeeze(1) 
+        mass = ((mass - self.config.MASS_MEAN) / (self.config.MASS_STD + 1e-8)).unsqueeze(1)
+
+        fused_with_mass = torch.cat([fused_emb2, mass], dim=1) 
+
+        output = self.regressor(fused_with_mass).squeeze(-1) 
         return output
 
 
@@ -154,11 +148,18 @@ def train(config, device):
     optimizer = AdamW([
     {'params': model.base_model.text_model.parameters(), 'lr': config.TEXT_LR},
     {'params': model.base_model.image_model.parameters(), 'lr': config.IMAGE_LR},
-    {'params': model.cross_attn.parameters(), 'lr': config.ATTENTION_LR},
+    {'params': model.cross_attn1.parameters(), 'lr': config.ATTENTION_LR},
+    {'params': model.cross_attn2.parameters(), 'lr': config.ATTENTION_LR},
     {'params': model.regressor.parameters(), 'lr': config.REGRESSOR_LR}
-    ], weight_decay=1e-4)
+    ], weight_decay=1e-3)
 
-    criterion = nn.L1Loss()
+    criterion = nn.HuberLoss()
+    scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.3,
+    patience=2,
+    )
 
     # Загрузка данных
     transforms = get_transforms(config)
@@ -196,12 +197,14 @@ def train(config, device):
             preds = model(
                 input_ids=batch['input_ids'].to(device),
                 attention_mask=batch['attention_mask'].to(device),
-                image=batch['image'].to(device)
+                image=batch['image'].to(device),
+                mass=batch['mass'].to(device),
             )
             labels = batch['label'].to(device)
 
             loss = criterion(preds, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -209,6 +212,7 @@ def train(config, device):
         avg_train_loss = total_loss / len(train_loader)
         # Валидация
         val_mae = validate(model, val_loader, device)
+        scheduler.step(val_mae)
 
         task.get_logger().report_scalar("Loss", "train_loss", iteration=epoch, value=avg_train_loss)
         task.get_logger().report_scalar("MAE", "val_mae", iteration=epoch, value=val_mae)
@@ -231,7 +235,8 @@ def validate(model, val_loader, device):
             preds = model(
                 input_ids=batch['input_ids'].to(device),
                 attention_mask=batch['attention_mask'].to(device),
-                image=batch['image'].to(device)
+                image=batch['image'].to(device),
+                mass=batch['mass'].to(device),
             )
             labels = batch['label'].to(device)
 
