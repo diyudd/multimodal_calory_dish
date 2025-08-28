@@ -14,14 +14,14 @@ class Config:
     IMAGE_MODEL_UNFREEZE: str = "blocks.6|conv_head|bn2"
     
     # Гиперпараметры
-    BATCH_SIZE: int = 128
+    BATCH_SIZE: int = 64
     LR: float = 1e-3
     TEXT_LR: float = 3e-5
     IMAGE_LR: float = 1e-4
     ATTENTION_LR: float = 1e-3
     REGRESSOR_LR: float = 1e-3
-    EPOCHS: int = 50
-    DROPOUT: float = 0.3
+    EPOCHS: int = 30
+    DROPOUT: float = 0.1
     HIDDEN_DIM: int = 256
     
     MASS_MEAN: float = 214.98   

@@ -78,28 +78,26 @@ class CrossAttentionModel(nn.Module):
 
         # Механизм внимания
         self.cross_attn1 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
-                                                 num_heads=4, 
+                                                 num_heads=2, 
                                                  dropout=config.DROPOUT)
         self.cross_attn2 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
-                                                 num_heads=4, 
+                                                 num_heads=2, 
                                                  dropout=config.DROPOUT)
         
         # LayerNorm и Dropout после attention
         self.post_attn_norm1 = nn.LayerNorm(config.HIDDEN_DIM)
         self.post_attn_norm2 = nn.LayerNorm(config.HIDDEN_DIM)
         self.post_attn_dropout = nn.Dropout(config.DROPOUT)
-        
-        # Регрессор с нормализацией и дропаут
+        in_dim = config.HIDDEN_DIM + 1
+       
         self.regressor = nn.Sequential(
-            nn.LayerNorm(config.HIDDEN_DIM + 1),  # Дополнительная нормализация после attention
-            nn.Linear(config.HIDDEN_DIM + 1, config.HIDDEN_DIM // 2), 
-            nn.ReLU(),  
-            nn.Dropout(config.DROPOUT),                             
-            nn.Linear(config.HIDDEN_DIM // 2, config.HIDDEN_DIM // 4),
-            nn.ReLU(),  
+            nn.Linear(in_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
             nn.Dropout(config.DROPOUT),
-            nn.Linear(config.HIDDEN_DIM // 4, 1),
+            nn.Linear(512, 1),
         )
+
         # self.regressor = nn.Linear(config.HIDDEN_DIM, 1)
         
     def forward(self, input_ids, attention_mask, image, mass):
@@ -131,12 +129,68 @@ class CrossAttentionModel(nn.Module):
         output = self.regressor(fused_with_mass).squeeze(-1) 
         return output
 
+class ConcatFusionModel(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.base_model = MultimodalModel(config)
+        in_dim = config.HIDDEN_DIM*2 + 1
+
+        # self.regressor = nn.Sequential(
+        #     nn.Linear(in_dim, 256),
+        #     nn.BatchNorm1d(256),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(256, 128),
+        #     nn.BatchNorm1d(128),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(128, 64),
+        #     nn.BatchNorm1d(64),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(64, 1),
+        # )
+
+        self.regressor = nn.Sequential(
+            nn.BatchNorm1d(in_dim),
+            nn.Linear(in_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 1),
+        )
+
+        # self.regressor = nn.Sequential(
+        #     nn.BatchNorm1d(in_dim),
+        #     nn.Linear(in_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Dropout(0.1),
+        #     nn.Linear(512, 128),
+        #     nn.ReLU(),
+        #     nn.Dropout(0.3),
+        #     nn.Linear(128, 1),
+        # )
+
+    def forward(self, input_ids, attention_mask, image, mass):
+        t, v = self.base_model(input_ids, attention_mask, image)
+        m = mass.unsqueeze(1) 
+        x = torch.cat([t, v, m], dim=1) 
+        return self.regressor(x).squeeze(-1)
+
+class RMSELoss(nn.Module):
+    def __init__(self, eps=1e-5):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.eps = eps
+
+    def forward(self, x, y):
+        return torch.sqrt(self.mse(x, y) + self.eps)
 
 def train(config, device):
     seed_everything(config.SEED)
 
     # Инициализация модели
-    model = CrossAttentionModel(config).to(device) 
+    model = ConcatFusionModel(config).to(device) 
     tokenizer = AutoTokenizer.from_pretrained(config.TEXT_MODEL_NAME)
 
     set_requires_grad(model.base_model.text_model,
@@ -148,12 +202,12 @@ def train(config, device):
     optimizer = AdamW([
     {'params': model.base_model.text_model.parameters(), 'lr': config.TEXT_LR},
     {'params': model.base_model.image_model.parameters(), 'lr': config.IMAGE_LR},
-    {'params': model.cross_attn1.parameters(), 'lr': config.ATTENTION_LR},
-    {'params': model.cross_attn2.parameters(), 'lr': config.ATTENTION_LR},
+    #{'params': model.cross_attn1.parameters(), 'lr': config.ATTENTION_LR},
+    #{'params': model.cross_attn2.parameters(), 'lr': config.ATTENTION_LR},
     {'params': model.regressor.parameters(), 'lr': config.REGRESSOR_LR}
     ], weight_decay=1e-3)
 
-    criterion = nn.HuberLoss()
+    criterion = RMSELoss()
     scheduler = ReduceLROnPlateau(
     optimizer,
     mode='min',
@@ -210,14 +264,17 @@ def train(config, device):
             total_loss += loss.item()
 
         avg_train_loss = total_loss / len(train_loader)
-        # Валидация
+
+        train_mae  = validate(model, train_loader , device)
         val_mae = validate(model, val_loader, device)
+
         scheduler.step(val_mae)
 
         task.get_logger().report_scalar("Loss", "train_loss", iteration=epoch, value=avg_train_loss)
-        task.get_logger().report_scalar("MAE", "val_mae", iteration=epoch, value=val_mae)
+        task.get_logger().report_scalar("MAE_train",  "train_mae",  iteration=epoch, value=train_mae)
+        task.get_logger().report_scalar("MAE_val",  "val_mae",    iteration=epoch, value=val_mae)
 
-        print(f"Epoch {epoch+1}/{config.EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val MAE: {val_mae:.2f}")
+        print(f"Epoch {epoch+1}/{config.EPOCHS} | Train Loss: {avg_train_loss:.4f} | Train MAE: {train_mae:.4f} | Val MAE: {val_mae:.2f}")
 
         # Сохраняем лучшую модель по MAE
         if val_mae < best_mae:
@@ -226,9 +283,11 @@ def train(config, device):
             print(f"New best model saved with MAE: {best_mae:.2f}")
 
 
+@torch.no_grad()
 def validate(model, val_loader, device):
     model.eval()
     mae_metric = torchmetrics.MeanAbsoluteError().to(device)
+    mae_metric.reset()
 
     with torch.no_grad():
         for batch in val_loader:
@@ -238,7 +297,6 @@ def validate(model, val_loader, device):
                 image=batch['image'].to(device),
                 mass=batch['mass'].to(device),
             )
-            labels = batch['label'].to(device)
 
             labels = batch['label'].to(device)
             mae_metric.update(preds, labels)

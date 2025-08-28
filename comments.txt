@@ -1,0 +1,115 @@
+Облегчил аугментацию данных.
+1) Упростить модель: убрать attention и поиграть с количеством слоев в regressor и количеством dropout.
+Убрал и сделал через обычный concat, но вроде как особо это ничего не дало.
+Epoch 1/30 | Train Loss: 317.6083 | Train MAE: 216.4513 | Val MAE: 218.25
+New best model saved with MAE: 218.25
+Epoch 2/30 | Train Loss: 266.9280 | Train MAE: 166.4110 | Val MAE: 167.21
+New best model saved with MAE: 167.21
+Epoch 3/30 | Train Loss: 192.2887 | Train MAE: 123.2787 | Val MAE: 121.08
+New best model saved with MAE: 121.08
+Epoch 4/30 | Train Loss: 162.5010 | Train MAE: 102.8996 | Val MAE: 104.47
+New best model saved with MAE: 104.47
+Epoch 5/30 | Train Loss: 138.6507 | Train MAE: 88.0089 | Val MAE: 93.12
+New best model saved with MAE: 93.12
+Epoch 6/30 | Train Loss: 119.7747 | Train MAE: 71.3185 | Val MAE: 83.55
+New best model saved with MAE: 83.55
+Epoch 7/30 | Train Loss: 109.8637 | Train MAE: 67.1577 | Val MAE: 77.76
+New best model saved with MAE: 77.76
+Epoch 8/30 | Train Loss: 101.9529 | Train MAE: 55.2768 | Val MAE: 75.42
+New best model saved with MAE: 75.42
+Epoch 9/30 | Train Loss: 94.3601 | Train MAE: 51.8021 | Val MAE: 71.49
+New best model saved with MAE: 71.49
+Epoch 10/30 | Train Loss: 87.7848 | Train MAE: 43.7979 | Val MAE: 67.15
+New best model saved with MAE: 67.15
+Epoch 11/30 | Train Loss: 85.0008 | Train MAE: 42.1983 | Val MAE: 66.21
+New best model saved with MAE: 66.21
+Epoch 12/30 | Train Loss: 78.7313 | Train MAE: 40.0984 | Val MAE: 65.68
+New best model saved with MAE: 65.68
+Epoch 13/30 | Train Loss: 74.4736 | Train MAE: 41.9596 | Val MAE: 68.33
+Epoch 14/30 | Train Loss: 74.4233 | Train MAE: 37.7002 | Val MAE: 63.73
+New best model saved with MAE: 63.73
+Epoch 15/30 | Train Loss: 71.5688 | Train MAE: 33.7439 | Val MAE: 62.08
+New best model saved with MAE: 62.08
+Epoch 16/30 | Train Loss: 67.9790 | Train MAE: 34.4393 | Val MAE: 62.93
+Epoch 17/30 | Train Loss: 65.0668 | Train MAE: 31.5703 | Val MAE: 63.61
+Epoch 18/30 | Train Loss: 66.3615 | Train MAE: 28.0206 | Val MAE: 61.54
+New best model saved with MAE: 61.54
+Epoch 19/30 | Train Loss: 58.6095 | Train MAE: 26.4637 | Val MAE: 62.04
+Epoch 20/30 | Train Loss: 58.6284 | Train MAE: 29.2267 | Val MAE: 62.71
+Epoch 21/30 | Train Loss: 59.0099 | Train MAE: 28.4334 | Val MAE: 59.17
+New best model saved with MAE: 59.17
+Epoch 22/30 | Train Loss: 57.9566 | Train MAE: 23.7767 | Val MAE: 59.55
+Epoch 23/30 | Train Loss: 61.8143 | Train MAE: 27.8028 | Val MAE: 60.09
+Epoch 24/30 | Train Loss: 57.9824 | Train MAE: 24.1064 | Val MAE: 60.27
+Epoch 25/30 | Train Loss: 52.4470 | Train MAE: 21.9706 | Val MAE: 59.33
+Epoch 26/30 | Train Loss: 53.9411 | Train MAE: 22.5156 | Val MAE: 58.03
+New best model saved with MAE: 58.03
+Epoch 27/30 | Train Loss: 52.4880 | Train MAE: 20.3375 | Val MAE: 59.60
+Epoch 28/30 | Train Loss: 50.8807 | Train MAE: 23.4546 | Val MAE: 61.32
+Epoch 29/30 | Train Loss: 48.3824 | Train MAE: 21.4096 | Val MAE: 60.17
+Epoch 30/30 | Train Loss: 50.7048 | Train MAE: 20.0265 | Val MAE: 59.41
+
+https://app.clear.ml/projects/e0207a4e59484b31931844591cb879ca/experiments/0f95cc89a5ed436a89d7f5130882e0c4/output/execution
+
+class ConcatFusionModel(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.base_model = MultimodalModel(config)
+        in_dim = config.HIDDEN_DIM*2 + 1
+
+        # self.regressor = nn.Sequential(
+        #     nn.Linear(in_dim, 256),
+        #     nn.BatchNorm1d(256),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(256, 128),
+        #     nn.BatchNorm1d(128),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(128, 64),
+        #     nn.BatchNorm1d(64),
+        #     nn.ReLU(),
+        #     nn.Dropout(config.DROPOUT),
+        #     nn.Linear(64, 1),
+        # )
+
+        self.regressor = nn.Sequential(
+            nn.BatchNorm1d(in_dim),
+            nn.Linear(in_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 1),
+        )
+
+        # self.regressor = nn.Sequential(
+        #     nn.BatchNorm1d(in_dim),
+        #     nn.Linear(in_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Dropout(0.1),
+        #     nn.Linear(512, 128),
+        #     nn.ReLU(),
+        #     nn.Dropout(0.3),
+        #     nn.Linear(128, 1),
+        # )
+
+    def forward(self, input_ids, attention_mask, image, mass):
+        t, v = self.base_model(input_ids, attention_mask, image)
+        m = mass.unsqueeze(1) 
+        x = torch.cat([t, v, m], dim=1) 
+        return self.regressor(x).squeeze(-1)
+
+Т.е с досточно простым регрессером все ровно валидация упирается в 60, хотя траин лос упал до 48, а траин мае аж до 20.
+Не могу понять во что упирается валидация.
+
+loss через сделал
+class RMSELoss(nn.Module):
+    def __init__(self, eps=1e-5):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.eps = eps
+
+    def forward(self, x, y):
+        return torch.sqrt(self.mse(x, y) + self.eps)
+
+Неужели кросс внимание не может справится с такой задачей или я где-то борщу?

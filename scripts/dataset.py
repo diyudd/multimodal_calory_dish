@@ -52,7 +52,8 @@ class MultimodalDataset(Dataset):
         return {"label": torch.tensor(label, dtype=torch.float32), 
                 "mass":  torch.tensor(mass,  dtype=torch.float32),
                 "image": image, 
-                "text": text}
+                "text": text
+                }
 
 
 def collate_fn(batch, tokenizer):
@@ -77,50 +78,81 @@ def collate_fn(batch, tokenizer):
 
 
 def get_transforms(config, ds_type="train"):
-    cfg = timm.get_pretrained_cfg(config.IMAGE_MODEL_NAME)
+    cfg = timm.get_pretrained_cfg(config.IMAGE_MODEL_NAME)  # cfg.input_size = (C,H,W)
+
+    H, W = cfg.input_size[1], cfg.input_size[2]  # type: ignore # целевой размер
 
     if ds_type == "train":
-        transforms = A.Compose(
-            [
-                A.SmallestMaxSize(
-                    max_size=max(cfg.input_size[1], cfg.input_size[2]), p=1.0), # type: ignore
-                A.RandomCrop(
-                    height=cfg.input_size[1], width=cfg.input_size[2], p=1.0), # type: ignore
-                A.Affine(scale=(0.9, 1.1),
-                         rotate=(-10, 10),
-                         translate_percent=(-0.05, 0.05),
-                         shear=(-8, 8),
-                         fill=0,
-                         p=0.8),
-                A.CoarseDropout(
-                    num_holes_range=(2, 8),
-                    hole_height_range=(int(0.07 * cfg.input_size[1]), # type: ignore
-                                       int(0.15 * cfg.input_size[1])), # type: ignore
-                    hole_width_range=(int(0.1 * cfg.input_size[2]), # type: ignore
-                                      int(0.15 * cfg.input_size[2])), # type: ignore
-                    fill=0,
-                    p=0.5),
-                A.ColorJitter(brightness=0.15,
-                              contrast=0.15,
-                              saturation=0.15,
-                              hue=0.1,
-                              p=0.7),
-                A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
-                A.ToTensorV2(p=1.0)
-            ],
-            seed=42,
-        )
+        transforms = A.Compose([
+            A.Resize(height=H, width=W),
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
+            A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
+            A.ToTensorV2()
+        ], seed=42)
+
+        # transforms = A.Compose([
+        #     A.RandomResizedCrop(height=H, width=W, scale=(0.9, 1.1), ratio=(0.95, 1.05), p=1.0),
+        #     A.HorizontalFlip(p=0.5),
+        #     A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
+        #     A.Normalize(mean=cfg.mean, std=cfg.std),
+        #     ToTensorV2()
+        # ], seed=42)
+
     else:
-        transforms = A.Compose(
-            [
-                A.SmallestMaxSize(
-                    max_size=max(cfg.input_size[1], cfg.input_size[2]), p=1.0), # type: ignore
-                A.CenterCrop(
-                    height=cfg.input_size[1], width=cfg.input_size[2], p=1.0), # type: ignore
-                A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
-                A.ToTensorV2(p=1.0)
-            ],
-            seed=42,
-        )
+        transforms = A.Compose([
+            A.Resize(height=H, width=W),
+            A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
+            A.ToTensorV2()
+        ], seed=42)
 
     return transforms
+
+# def get_transforms(config, ds_type="train"):
+#     cfg = timm.get_pretrained_cfg(config.IMAGE_MODEL_NAME)
+
+#     if ds_type == "train":
+#         transforms = A.Compose(
+#             [
+#                 A.SmallestMaxSize(
+#                     max_size=max(cfg.input_size[1], cfg.input_size[2]), p=1.0), # type: ignore
+#                 A.RandomCrop(
+#                     height=cfg.input_size[1], width=cfg.input_size[2], p=1.0), # type: ignore
+#                 A.Affine(scale=(0.9, 1.1),
+#                          rotate=(-10, 10),
+#                          translate_percent=(-0.05, 0.05),
+#                          shear=(-8, 8),
+#                          fill=0,
+#                          p=0.8),
+#                 A.CoarseDropout(
+#                     num_holes_range=(2, 8),
+#                     hole_height_range=(int(0.07 * cfg.input_size[1]), # type: ignore
+#                                        int(0.15 * cfg.input_size[1])), # type: ignore
+#                     hole_width_range=(int(0.1 * cfg.input_size[2]), # type: ignore
+#                                       int(0.15 * cfg.input_size[2])), # type: ignore
+#                     fill=0,
+#                     p=0.5),
+#                 A.ColorJitter(brightness=0.15,
+#                               contrast=0.15,
+#                               saturation=0.15,
+#                               hue=0.1,
+#                               p=0.7),
+#                 A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
+#                 A.ToTensorV2(p=1.0)
+#             ],
+#             seed=42,
+#         )
+#     else:
+#         transforms = A.Compose(
+#             [
+#                 A.SmallestMaxSize(
+#                     max_size=max(cfg.input_size[1], cfg.input_size[2]), p=1.0), # type: ignore
+#                 A.CenterCrop(
+#                     height=cfg.input_size[1], width=cfg.input_size[2], p=1.0), # type: ignore
+#                 A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
+#                 A.ToTensorV2(p=1.0)
+#             ],
+#             seed=42,
+#         )
+
+#     return transforms
