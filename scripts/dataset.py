@@ -36,7 +36,6 @@ class MultimodalDataset(Dataset):
         text = " ".join([self.ingr_dict.get(i, "") for i in ingr_ids]) # type: ignore
         
         label = self.df.loc[idx, "total_calories"]
-        mass  = self.df.loc[idx, "total_mass"]
 
         dish_id = self.df.loc[idx, "dish_id"]
         img_path = f"{self.img_dir}/{dish_id}/rgb.png"
@@ -50,7 +49,6 @@ class MultimodalDataset(Dataset):
         image = self.transforms(image=np.array(image))["image"]
 
         return {"label": torch.tensor(label, dtype=torch.float32), 
-                "mass":  torch.tensor(mass,  dtype=torch.float32),
                 "image": image, 
                 "text": text
                 }
@@ -60,7 +58,6 @@ def collate_fn(batch, tokenizer):
     texts = [item["text"] for item in batch]
     images = torch.stack([item["image"] for item in batch])
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.float32)
-    masses = torch.tensor([item["mass"] for item in batch], dtype=torch.float32)
 
 
     tokenized_input = tokenizer(texts,
@@ -71,7 +68,6 @@ def collate_fn(batch, tokenizer):
     return {
         "label": labels,
         "image": images,
-        "mass": masses,
         "input_ids": tokenized_input["input_ids"],
         "attention_mask": tokenized_input["attention_mask"]
     }

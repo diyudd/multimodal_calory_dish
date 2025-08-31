@@ -14,18 +14,15 @@ class Config:
     IMAGE_MODEL_UNFREEZE: str = "blocks.6|conv_head|bn2"
     
     # Гиперпараметры
-    BATCH_SIZE: int = 64
+    BATCH_SIZE: int = 4
     LR: float = 1e-3
-    TEXT_LR: float = 3e-5
-    IMAGE_LR: float = 1e-4
+    TEXT_LR: float = 3e-4
+    IMAGE_LR: float = 1e-3
     ATTENTION_LR: float = 1e-3
     REGRESSOR_LR: float = 1e-3
     EPOCHS: int = 30
-    DROPOUT: float = 0.1
-    HIDDEN_DIM: int = 256
-    
-    MASS_MEAN: float = 214.98   
-    MASS_STD:  float = 161.50  
+    DROPOUT: float = 0.25
+    HIDDEN_DIM: int = 128
 
     # Пути
     DISH_CSV_PATH: str = "data/dish.csv"
@@ -44,7 +41,7 @@ def main():
     # ClearML
     task = Task.init(
         project_name="Multimodal_Calory_Dish",
-        task_name="CrossAttention_Training",
+        task_name="Эксперимент_5",
         task_type=Task.TaskTypes.training
     )
     task.connect(cfg)

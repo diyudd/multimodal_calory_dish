@@ -11,12 +11,13 @@ import timm
 from transformers import AutoModel, AutoTokenizer
 from dataset import MultimodalDataset, collate_fn, get_transforms
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from transformers import get_cosine_schedule_with_warmup
 
 from clearml import Task
 
 task = Task.init(
     project_name="Multimodal_Calory_Dish",
-    task_name="CrossAttention_Training",
+    task_name="Эксперимент_5",
     task_type=Task.TaskTypes.training
 )
 
@@ -61,7 +62,7 @@ class MultimodalModel(nn.Module):
         self.image_proj = nn.Linear(self.image_model.num_features, config.HIDDEN_DIM) # type: ignore
 
     def forward(self, input_ids, attention_mask, image):
-        text_features = self.text_model(input_ids, attention_mask).last_hidden_state[:,  0, :]
+        text_features = self.text_model(input_ids, attention_mask).last_hidden_state[:, 0, :]
         image_features = self.image_model(image)
 
         text_emb = self.text_proj(text_features)
@@ -79,28 +80,31 @@ class CrossAttentionModel(nn.Module):
         # Механизм внимания
         self.cross_attn1 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
                                                  num_heads=2, 
-                                                 dropout=config.DROPOUT)
+                                                 #dropout=config.DROPOUT
+                                                 )
         self.cross_attn2 = nn.MultiheadAttention(embed_dim=config.HIDDEN_DIM, 
                                                  num_heads=2, 
-                                                 dropout=config.DROPOUT)
+                                                 #dropout=config.DROPOUT
+                                                 )
         
         # LayerNorm и Dropout после attention
         self.post_attn_norm1 = nn.LayerNorm(config.HIDDEN_DIM)
         self.post_attn_norm2 = nn.LayerNorm(config.HIDDEN_DIM)
         self.post_attn_dropout = nn.Dropout(config.DROPOUT)
-        in_dim = config.HIDDEN_DIM + 1
+        in_dim = config.HIDDEN_DIM
        
+        # Эксперимент_4
         self.regressor = nn.Sequential(
-            nn.Linear(in_dim, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(in_dim, 128),
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(config.DROPOUT),
-            nn.Linear(512, 1),
+            nn.Linear(128, 1),
         )
 
         # self.regressor = nn.Linear(config.HIDDEN_DIM, 1)
         
-    def forward(self, input_ids, attention_mask, image, mass):
+    def forward(self, input_ids, attention_mask, image):
        
         text_emb, image_emb = self.base_model(input_ids, attention_mask, image)
 
@@ -113,20 +117,16 @@ class CrossAttentionModel(nn.Module):
             value=image_emb
         )
         # Residual connection
-        fused_emb1 = self.post_attn_norm1(attended_emb1 + text_emb)
+        fused_emb1 = attended_emb1 + text_emb
 
         attended_emb2, _ = self.cross_attn2(
             query=fused_emb1,
             key=image_emb,
             value=image_emb
         )
-        fused_emb2 = self.post_attn_norm2(self.post_attn_dropout(attended_emb2 + fused_emb1)).squeeze(0)
+        fused_emb2 = (attended_emb2 + fused_emb1).squeeze(0)
 
-        mass = ((mass - self.config.MASS_MEAN) / (self.config.MASS_STD + 1e-8)).unsqueeze(1)
-
-        fused_with_mass = torch.cat([fused_emb2, mass], dim=1) 
-
-        output = self.regressor(fused_with_mass).squeeze(-1) 
+        output = self.regressor(fused_emb2).squeeze(-1) 
         return output
 
 class ConcatFusionModel(nn.Module):
@@ -134,47 +134,54 @@ class ConcatFusionModel(nn.Module):
         super().__init__()
         self.config = config
         self.base_model = MultimodalModel(config)
-        in_dim = config.HIDDEN_DIM*2 + 1
+        in_dim = config.HIDDEN_DIM*2
 
+        # Эксперимент 1
         # self.regressor = nn.Sequential(
-        #     nn.Linear(in_dim, 256),
-        #     nn.BatchNorm1d(256),
+        #     nn.Linear(in_dim, 1),
+        # )
+
+        # Эксперимент 2
+        self.regressor = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(in_dim, 1)
+        )
+
+        # Эксперимент 3
+        # self.regressor = nn.Sequential(
+        #     nn.Linear(in_dim, 128),
+        #     nn.LayerNorm(128),
         #     nn.ReLU(),
         #     nn.Dropout(config.DROPOUT),
-        #     nn.Linear(256, 128),
-        #     nn.BatchNorm1d(128),
+        #     nn.Linear(128, 1),
+        # )
+
+        # Эксперимент 4
+        # self.regressor = nn.Sequential(
+        #     nn.LayerNorm(in_dim),
+        #     nn.Linear(in_dim, 128),
         #     nn.ReLU(),
         #     nn.Dropout(config.DROPOUT),
         #     nn.Linear(128, 64),
-        #     nn.BatchNorm1d(64),
         #     nn.ReLU(),
         #     nn.Dropout(config.DROPOUT),
         #     nn.Linear(64, 1),
         # )
 
+        # Эксперимент_5
         self.regressor = nn.Sequential(
-            nn.BatchNorm1d(in_dim),
-            nn.Linear(in_dim, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 1),
+            nn.Linear(in_dim, 256), 
+            nn.LayerNorm(256), 
+            nn.ReLU(), 
+            nn.Dropout(config.DROPOUT), 
+            nn.Linear(256, 1), 
         )
 
-        # self.regressor = nn.Sequential(
-        #     nn.BatchNorm1d(in_dim),
-        #     nn.Linear(in_dim, 512),
-        #     nn.ReLU(),
-        #     nn.Dropout(0.1),
-        #     nn.Linear(512, 128),
-        #     nn.ReLU(),
-        #     nn.Dropout(0.3),
-        #     nn.Linear(128, 1),
-        # )
 
-    def forward(self, input_ids, attention_mask, image, mass):
+    def forward(self, input_ids, attention_mask, image):
         t, v = self.base_model(input_ids, attention_mask, image)
-        m = mass.unsqueeze(1) 
-        x = torch.cat([t, v, m], dim=1) 
+        x = torch.cat([t, v], dim=1) 
         return self.regressor(x).squeeze(-1)
 
 class RMSELoss(nn.Module):
@@ -205,15 +212,10 @@ def train(config, device):
     #{'params': model.cross_attn1.parameters(), 'lr': config.ATTENTION_LR},
     #{'params': model.cross_attn2.parameters(), 'lr': config.ATTENTION_LR},
     {'params': model.regressor.parameters(), 'lr': config.REGRESSOR_LR}
-    ], weight_decay=1e-3)
+    ], weight_decay=1e-4)
 
     criterion = RMSELoss()
-    scheduler = ReduceLROnPlateau(
-    optimizer,
-    mode='min',
-    factor=0.3,
-    patience=2,
-    )
+
 
     # Загрузка данных
     transforms = get_transforms(config)
@@ -227,6 +229,7 @@ def train(config, device):
                               shuffle=True,
                               collate_fn=partial(collate_fn,
                                                  tokenizer=tokenizer),
+                              persistent_workers=True,
                               num_workers=4,
                               pin_memory=True)
     
@@ -235,8 +238,19 @@ def train(config, device):
                             shuffle=False,
                             collate_fn=partial(collate_fn,
                                                tokenizer=tokenizer),
+                            persistent_workers=True,                  
                             num_workers=4,
                             pin_memory=True)
+    
+    steps_per_epoch   = len(train_loader)
+    num_training_steps = config.EPOCHS * steps_per_epoch
+    num_warmup_steps   = int(0.1 * num_training_steps) 
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps
+    )
 
     best_mae = float("inf")
 
@@ -252,7 +266,6 @@ def train(config, device):
                 input_ids=batch['input_ids'].to(device),
                 attention_mask=batch['attention_mask'].to(device),
                 image=batch['image'].to(device),
-                mass=batch['mass'].to(device),
             )
             labels = batch['label'].to(device)
 
@@ -260,6 +273,7 @@ def train(config, device):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
             total_loss += loss.item()
 
@@ -268,7 +282,6 @@ def train(config, device):
         train_mae  = validate(model, train_loader , device)
         val_mae = validate(model, val_loader, device)
 
-        scheduler.step(val_mae)
 
         task.get_logger().report_scalar("Loss", "train_loss", iteration=epoch, value=avg_train_loss)
         task.get_logger().report_scalar("MAE_train",  "train_mae",  iteration=epoch, value=train_mae)
@@ -295,7 +308,6 @@ def validate(model, val_loader, device):
                 input_ids=batch['input_ids'].to(device),
                 attention_mask=batch['attention_mask'].to(device),
                 image=batch['image'].to(device),
-                mass=batch['mass'].to(device),
             )
 
             labels = batch['label'].to(device)
