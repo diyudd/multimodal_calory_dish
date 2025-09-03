@@ -82,7 +82,7 @@ def get_transforms(config, ds_type="train"):
         transforms = A.Compose([
             A.Resize(height=H, width=W),
             A.HorizontalFlip(p=0.5),
-            A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
+            A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02, p=0.3),
             A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
             A.ToTensorV2()
         ], seed=42)
@@ -92,12 +92,13 @@ def get_transforms(config, ds_type="train"):
         #     A.HorizontalFlip(p=0.5),
         #     A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
         #     A.Normalize(mean=cfg.mean, std=cfg.std),
-        #     ToTensorV2()
+        #     A.ToTensorV2()
         # ], seed=42)
 
     else:
         transforms = A.Compose([
             A.Resize(height=H, width=W),
+            A.CenterCrop(height=H, width=W),
             A.Normalize(mean=cfg.mean, std=cfg.std), # type: ignore
             A.ToTensorV2()
         ], seed=42)
@@ -152,3 +153,50 @@ def get_transforms(config, ds_type="train"):
 #         )
 
 #     return transforms
+
+class ImageOnlyDataset(Dataset):
+    def __init__(self, config, transforms, ds_type: str = "train"):
+        # читаем общий dish.csv и фильтруем по split
+        df = pd.read_csv(config.DISH_CSV_PATH)
+        self.df = df[df["split"] == ds_type].reset_index(drop=True)
+
+        self.image_cfg = timm.get_pretrained_cfg(config.IMAGE_MODEL_NAME)
+        self.transforms = transforms
+        self.img_dir = config.IMG_DIR
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx: int):
+        row = self.df.loc[idx]
+        label = self.df.loc[idx, "total_calories"]
+        dish_id = row["dish_id"]
+
+        img_path = f"{self.img_dir}/{dish_id}/rgb.png"
+
+        try:
+            image = Image.open(img_path).convert("RGB")
+            image = np.array(image)
+        except Exception:
+            # fallback: синтетика подходящего размера (редко понадобится)
+            H, W = self.image_cfg.input_size[1], self.image_cfg.input_size[2]  # type: ignore
+            image = np.random.randint(0, 255, (H, W, 3), dtype=np.uint8)
+
+        # применяем аугментации/нормализацию
+        image = self.transforms(image=image)["image"] 
+
+        return {
+            "label": torch.tensor(label, dtype=torch.float32),
+            "image": image,
+            "dish_id": dish_id,
+        }
+
+
+def image_only_collate_fn(batch):
+    images = torch.stack([b["image"] for b in batch], dim=0)
+    labels = torch.tensor([b["label"] for b in batch], dtype=torch.float32)
+    out = {
+        "image": images,
+        "label": labels, 
+    }
+    return out

@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import torchmetrics
 import timm
 from transformers import AutoModel, AutoTokenizer
-from dataset import MultimodalDataset, collate_fn, get_transforms
+from dataset import MultimodalDataset, collate_fn, get_transforms, ImageOnlyDataset, image_only_collate_fn
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from transformers import get_cosine_schedule_with_warmup
 
@@ -17,7 +17,7 @@ from clearml import Task
 
 task = Task.init(
     project_name="Multimodal_Calory_Dish",
-    task_name="Эксперимент_5",
+    task_name="Эксперимент_2_image",
     task_type=Task.TaskTypes.training
 )
 
@@ -28,7 +28,6 @@ def seed_everything(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.benchmark = True
-
 
 def set_requires_grad(module: nn.Module, unfreeze_pattern="", verbose=False):
     if len(unfreeze_pattern) == 0:
@@ -193,122 +192,211 @@ class RMSELoss(nn.Module):
     def forward(self, x, y):
         return torch.sqrt(self.mse(x, y) + self.eps)
 
+class ImageRegressor(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.image_model = timm.create_model(
+            config.IMAGE_MODEL_NAME,
+            pretrained=True,
+            num_classes=0
+        )
+        in_dim = self.image_model.num_features  
+        self.head = nn.Sequential(
+            nn.LayerNorm(in_dim),  # type: ignore
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(in_dim, 256),# type: ignore
+            nn.ReLU(),
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(256, 1),
+        )
+
+    def forward(self, image):
+        feats = self.image_model(image)
+        out = self.head(feats).squeeze(-1)
+        return out
+
 def train(config, device):
     seed_everything(config.SEED)
 
-    # Инициализация модели
-    model = ConcatFusionModel(config).to(device) 
-    tokenizer = AutoTokenizer.from_pretrained(config.TEXT_MODEL_NAME)
+    # --- ВЕТВЛЕНИЕ ПО РЕЖИМУ ---
+    if getattr(config, "USE_IMAGE_ONLY", False):
+        # ===== Image-only =====
+        model = ImageRegressor(config).to(device)
 
-    set_requires_grad(model.base_model.text_model,
-                      unfreeze_pattern=config.TEXT_MODEL_UNFREEZE, verbose=True)
-    set_requires_grad(model.base_model.image_model,
-                      unfreeze_pattern=config.IMAGE_MODEL_UNFREEZE, verbose=True)
+        # Размораживание только изображения
+        set_requires_grad(model.image_model,
+                          unfreeze_pattern=config.IMAGE_MODEL_UNFREEZE,
+                          verbose=True)
 
-    #optimizer = AdamW(model.parameters(), lr=config.LR)
-    optimizer = AdamW([
-    {'params': model.base_model.text_model.parameters(), 'lr': config.TEXT_LR},
-    {'params': model.base_model.image_model.parameters(), 'lr': config.IMAGE_LR},
-    #{'params': model.cross_attn1.parameters(), 'lr': config.ATTENTION_LR},
-    #{'params': model.cross_attn2.parameters(), 'lr': config.ATTENTION_LR},
-    {'params': model.regressor.parameters(), 'lr': config.REGRESSOR_LR}
-    ], weight_decay=1e-4)
+        optimizer = AdamW([
+            {'params': model.image_model.parameters(), 'lr': config.IMAGE_LR},
+            {'params': model.head.parameters(),        'lr': config.REGRESSOR_LR},
+        ], weight_decay=5e-5)
 
-    criterion = RMSELoss()
+        criterion = nn.HuberLoss(delta=15.0) 
 
+        # Трансформы и датасеты только для изображений
+        train_tfms = get_transforms(config, ds_type="train")
+        val_tfms   = get_transforms(config, ds_type="test")
 
-    # Загрузка данных
-    transforms = get_transforms(config)
-    val_transforms = get_transforms(config, ds_type="test")
+        train_ds = ImageOnlyDataset(config, train_tfms, ds_type="train")  # type: ignore
+        val_ds   = ImageOnlyDataset(config, val_tfms,   ds_type="test")   # type: ignore
 
-    train_dataset = MultimodalDataset(config, transforms)
-    val_dataset = MultimodalDataset(config, val_transforms, ds_type="test")
+        train_loader = DataLoader(
+            train_ds, batch_size=config.BATCH_SIZE, shuffle=True,
+            num_workers=4, pin_memory=True, collate_fn=image_only_collate_fn
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=config.BATCH_SIZE, shuffle=False,
+            num_workers=4, pin_memory=True, collate_fn=image_only_collate_fn
+        )
 
-    train_loader = DataLoader(train_dataset,
-                              batch_size=config.BATCH_SIZE,
-                              shuffle=True,
-                              collate_fn=partial(collate_fn,
-                                                 tokenizer=tokenizer),
-                              persistent_workers=True,
-                              num_workers=4,
-                              pin_memory=True)
-    
-    val_loader = DataLoader(val_dataset,
-                            batch_size=config.BATCH_SIZE,
-                            shuffle=False,
-                            collate_fn=partial(collate_fn,
-                                               tokenizer=tokenizer),
-                            persistent_workers=True,                  
-                            num_workers=4,
-                            pin_memory=True)
-    
-    steps_per_epoch   = len(train_loader)
-    num_training_steps = config.EPOCHS * steps_per_epoch
-    num_warmup_steps   = int(0.1 * num_training_steps) 
+        steps_per_epoch    = len(train_loader)
+        num_training_steps = config.EPOCHS * steps_per_epoch
+        num_warmup_steps   = int(0.1 * num_training_steps)
 
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps
-    )
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+        plateau = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
-    best_mae = float("inf")
+        best_mae = float("inf")
+        print("training started (IMAGE-ONLY)")
+        for epoch in range(config.EPOCHS):
+            model.train()
+            total_loss = 0.0
 
-    print("training started")
-    for epoch in range(config.EPOCHS):
-        model.train()
-        total_loss = 0.0
+            for batch in train_loader:
+                optimizer.zero_grad()
+                preds  = model(image=batch['image'].to(device))
+                labels = batch['label'].to(device)
 
-        for batch in train_loader:
-            optimizer.zero_grad()
+                loss = criterion(preds, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
 
-            preds = model(
-                input_ids=batch['input_ids'].to(device),
-                attention_mask=batch['attention_mask'].to(device),
-                image=batch['image'].to(device),
-            )
-            labels = batch['label'].to(device)
+                total_loss += loss.item()
 
-            loss = criterion(preds, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
+            avg_train_loss = total_loss / len(train_loader)
 
-            total_loss += loss.item()
+            train_mae = validate(model, train_loader, device, use_image_only=True)
+            val_mae   = validate(model, val_loader,   device, use_image_only=True)
+            plateau.step(val_mae)
 
-        avg_train_loss = total_loss / len(train_loader)
+            task.get_logger().report_scalar("Loss",      "train_loss", iteration=epoch, value=avg_train_loss)
+            task.get_logger().report_scalar("MAE_train", "train_mae",  iteration=epoch, value=train_mae)
+            task.get_logger().report_scalar("MAE_val",   "val_mae",    iteration=epoch, value=val_mae)
 
-        train_mae  = validate(model, train_loader , device)
-        val_mae = validate(model, val_loader, device)
+            print(f"Epoch {epoch+1}/{config.EPOCHS} | Train Loss: {avg_train_loss:.4f} | Train MAE: {train_mae:.2f} | Val MAE: {val_mae:.2f}")
 
+            if val_mae < best_mae:
+                best_mae = val_mae
+                torch.save(model.state_dict(), config.SAVE_PATH)
+                print(f"New best (IMAGE-ONLY) model saved with MAE: {best_mae:.2f}")
 
-        task.get_logger().report_scalar("Loss", "train_loss", iteration=epoch, value=avg_train_loss)
-        task.get_logger().report_scalar("MAE_train",  "train_mae",  iteration=epoch, value=train_mae)
-        task.get_logger().report_scalar("MAE_val",  "val_mae",    iteration=epoch, value=val_mae)
+    else:
+        # ===== Multimodal (твой текущий) =====
+        model = ConcatFusionModel(config).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(config.TEXT_MODEL_NAME)
 
-        print(f"Epoch {epoch+1}/{config.EPOCHS} | Train Loss: {avg_train_loss:.4f} | Train MAE: {train_mae:.4f} | Val MAE: {val_mae:.2f}")
+        set_requires_grad(model.base_model.text_model,
+                          unfreeze_pattern=config.TEXT_MODEL_UNFREEZE, verbose=True)
+        set_requires_grad(model.base_model.image_model,
+                          unfreeze_pattern=config.IMAGE_MODEL_UNFREEZE, verbose=True)
 
-        # Сохраняем лучшую модель по MAE
-        if val_mae < best_mae:
-            best_mae = val_mae
-            torch.save(model.state_dict(), config.SAVE_PATH)
-            print(f"New best model saved with MAE: {best_mae:.2f}")
+        optimizer = AdamW([
+            {'params': model.base_model.text_model.parameters(), 'lr': config.TEXT_LR},
+            {'params': model.base_model.image_model.parameters(), 'lr': config.IMAGE_LR},
+            {'params': model.regressor.parameters(),              'lr': config.REGRESSOR_LR}
+        ], weight_decay=1e-4)
+
+        criterion = RMSELoss()
+
+        transforms     = get_transforms(config)
+        val_transforms = get_transforms(config, ds_type="test")
+        train_dataset  = MultimodalDataset(config, transforms)
+        val_dataset    = MultimodalDataset(config, val_transforms, ds_type="test")
+
+        train_loader = DataLoader(
+            train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
+            collate_fn=partial(collate_fn, tokenizer=tokenizer),
+            persistent_workers=True, num_workers=4, pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
+            collate_fn=partial(collate_fn, tokenizer=tokenizer),
+            persistent_workers=True, num_workers=4, pin_memory=True
+        )
+
+        steps_per_epoch    = len(train_loader)
+        num_training_steps = config.EPOCHS * steps_per_epoch
+        num_warmup_steps   = int(0.1 * num_training_steps)
+
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+
+        best_mae = float("inf")
+        print("training started (MULTIMODAL)")
+        for epoch in range(config.EPOCHS):
+            model.train()
+            total_loss = 0.0
+
+            for batch in train_loader:
+                optimizer.zero_grad()
+                preds = model(
+                    input_ids=batch['input_ids'].to(device),
+                    attention_mask=batch['attention_mask'].to(device),
+                    image=batch['image'].to(device),
+                )
+                labels = batch['label'].to(device)
+
+                loss = criterion(preds, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+
+                total_loss += loss.item()
+
+            avg_train_loss = total_loss / len(train_loader)
+            train_mae = validate(model, train_loader, device, use_image_only=False)
+            val_mae   = validate(model, val_loader,   device, use_image_only=False)
+
+            task.get_logger().report_scalar("Loss",      "train_loss", iteration=epoch, value=avg_train_loss)
+            task.get_logger().report_scalar("MAE_train", "train_mae",  iteration=epoch, value=train_mae)
+            task.get_logger().report_scalar("MAE_val",   "val_mae",    iteration=epoch, value=val_mae)
+
+            print(f"Epoch {epoch+1}/{config.EPOCHS} | Train Loss: {avg_train_loss:.4f} | Train MAE: {train_mae:.2f} | Val MAE: {val_mae:.2f}")
+
+            if val_mae < best_mae:
+                best_mae = val_mae
+                torch.save(model.state_dict(), config.SAVE_PATH)
+                print(f"New best (MULTIMODAL) model saved with MAE: {best_mae:.2f}")
 
 
 @torch.no_grad()
-def validate(model, val_loader, device):
+def validate(model, val_loader, device, use_image_only: bool):
     model.eval()
     mae_metric = torchmetrics.MeanAbsoluteError().to(device)
     mae_metric.reset()
 
     with torch.no_grad():
         for batch in val_loader:
-            preds = model(
-                input_ids=batch['input_ids'].to(device),
-                attention_mask=batch['attention_mask'].to(device),
-                image=batch['image'].to(device),
-            )
+            if use_image_only:
+                preds = model(image=batch['image'].to(device))
+            else:
+                preds = model(
+                    input_ids=batch['input_ids'].to(device),
+                    attention_mask=batch['attention_mask'].to(device),
+                    image=batch['image'].to(device),
+                )
 
             labels = batch['label'].to(device)
             mae_metric.update(preds, labels)
